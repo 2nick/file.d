@@ -24,8 +24,11 @@ type metrics struct {
 
 	root *mNode
 
-	current  *prometheus.CounterVec
-	previous *prometheus.CounterVec
+	currentEventsTotal  *prometheus.CounterVec
+	previousEventsTotal *prometheus.CounterVec
+
+	currentEventSizeSummary  *prometheus.SummaryVec
+	previousEventSizeSummary *prometheus.SummaryVec
 }
 
 type mNode struct {
@@ -53,8 +56,10 @@ func (m *metricsHolder) AddAction(metricName string, metricLabels []string) {
 			childs: make(map[string]*mNode),
 			mu:     &sync.RWMutex{},
 		},
-		current:  nil,
-		previous: nil,
+		currentEventsTotal:       nil,
+		previousEventsTotal:      nil,
+		currentEventSizeSummary:  nil,
+		previousEventSizeSummary: nil,
 	})
 }
 
@@ -70,22 +75,41 @@ func (m *metricsHolder) nextMetricsGen() {
 			continue
 		}
 
-		opts := prometheus.CounterOpts{
+		etOpts := prometheus.CounterOpts{
 			Namespace:   "file_d",
 			Subsystem:   "pipeline_" + m.pipelineName,
 			Name:        metrics.name + "_events_total",
 			Help:        fmt.Sprintf("how many events processed by pipeline %q and #%d action", m.pipelineName, index),
 			ConstLabels: map[string]string{"gen": metricsGen},
 		}
-		counter := prometheus.NewCounterVec(opts, append([]string{"status"}, metrics.labels...))
-		obsolete := metrics.previous
+		counterEventsTotal := prometheus.NewCounterVec(etOpts, append([]string{"status"}, metrics.labels...))
+		obsoleteEventsTotal := metrics.previousEventsTotal
 
-		metrics.previous = metrics.current
-		metrics.current = counter
+		metrics.previousEventsTotal = metrics.currentEventsTotal
+		metrics.currentEventsTotal = counterEventsTotal
 
-		m.registry.MustRegister(counter)
-		if obsolete != nil {
-			m.registry.Unregister(obsolete)
+		m.registry.MustRegister(counterEventsTotal)
+		if obsoleteEventsTotal != nil {
+			m.registry.Unregister(obsoleteEventsTotal)
+		}
+
+		esOpts := prometheus.SummaryOpts{
+			Namespace:   "file_d",
+			Subsystem:   "pipeline_" + m.pipelineName,
+			Name:        metrics.name + "_event_size_bytes",
+			Help:        fmt.Sprintf("sizes of events processed by pipeline %q and #%d action", m.pipelineName, index),
+			ConstLabels: map[string]string{"gen": metricsGen},
+			Objectives:  map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		}
+		currentEventSizeSummary := prometheus.NewSummaryVec(esOpts, append([]string{"status"}, metrics.labels...))
+		obsoleteEventSizeSummary := metrics.previousEventSizeSummary
+
+		metrics.previousEventSizeSummary = metrics.currentEventSizeSummary
+		metrics.currentEventSizeSummary = currentEventSizeSummary
+
+		m.registry.MustRegister(currentEventSizeSummary)
+		if obsoleteEventSizeSummary != nil {
+			m.registry.Unregister(obsoleteEventSizeSummary)
 		}
 	}
 
@@ -142,7 +166,8 @@ func (m *metricsHolder) count(event *Event, actionIndex int, eventStatus eventSt
 		mn = nextMN
 	}
 
-	metrics.current.WithLabelValues(valuesBuf...).Inc()
+	metrics.currentEventsTotal.WithLabelValues(valuesBuf...).Inc()
+	metrics.currentEventSizeSummary.WithLabelValues(valuesBuf...).Observe(float64(event.Size))
 
 	return valuesBuf
 }
